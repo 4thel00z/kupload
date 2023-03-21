@@ -1,0 +1,89 @@
+#!/bin/bash
+
+# Function to print usage instructions
+function usage() {
+  echo "Usage: $0 [-c context] [-n namespace] [script_file]"
+  echo ""
+  echo "  -c: Kubernetes context to use (optional, defaults to current context)"
+  echo "  -n: Namespace to search for pods (optional, defaults to current namespace)"
+  echo "  script_file: Path to Python script file to upload and execute (optional)"
+  echo ""
+  echo "If script_file is not present, the script will be read from stdin."
+  exit 1
+}
+
+# Parse command line arguments
+while getopts "c:n:" opt; do
+  case ${opt} in
+    c )
+      CONTEXT=${OPTARG}
+      ;;
+    n )
+      NAMESPACE=${OPTARG}
+      ;;
+    \? )
+      usage
+      ;;
+    : )
+      echo "Error: -$OPTARG requires an argument."
+      usage
+      ;;
+  esac
+done
+
+# Set default context if not provided
+if [ -z "${CONTEXT}" ]; then
+  CONTEXT=$(kubectl config current-context)
+fi
+
+# Set default namespace if not provided
+if [ -z "${NAMESPACE}" ]; then
+  NAMESPACE=$(kubectl config view --context="${CONTEXT}" --minify=true --output 'jsonpath={..namespace}')
+fi
+
+# Get script from command line argument or stdin
+if [ -n "${1}" ]; then
+  SCRIPT=$(cat "${1}")
+else
+  SCRIPT=$(cat)
+fi
+
+# Check if script is present
+if [ -z "${SCRIPT}" ]; then
+  echo "Error: No script provided."
+  usage
+fi
+
+# Create temporary file for script
+SCRIPT_FILE=$(mktemp)
+
+# Save script to temporary file
+echo "${SCRIPT}" > "${SCRIPT_FILE}"
+
+# Get list of pods in namespace
+POD_LIST=$(kubectl get pods -n "${NAMESPACE}" --context="${CONTEXT}" --output=jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+
+# Check if any pods were found
+if [ -z "${POD_LIST}" ]; then
+  echo "Error: No pods found in namespace '${NAMESPACE}' in context '${CONTEXT}'."
+  exit 1
+fi
+
+# Use peco for fuzzy search of pods
+SELECTED_POD=$(echo "${POD_LIST}" | peco)
+
+# Check if a pod was selected
+if [ -z "${SELECTED_POD}" ]; then
+  echo "Error: No pod selected."
+  exit 1
+fi
+
+# Upload and execute the Python script on the selected pod
+echo "Uploading and executing script on pod '${SELECTED_POD}'..."
+kubectl cp "${SCRIPT_FILE}" "${SELECTED_POD}:/tmp/script.py" -n "${NAMESPACE}" --context="${CONTEXT}"
+kubectl exec "${SELECTED_POD}" -n "${NAMESPACE}" -- python3 /tmp/script.py --context="${CONTEXT}"
+
+# Delete temporary file
+rm "${SCRIPT_FILE}"
+
+echo "Done."
